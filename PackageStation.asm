@@ -1,4 +1,5 @@
 ;inputs
+
 safetyOK				equ		p0.0
 palletizerElevMoving	equ		p0.1
 pallElevBackLimit		equ		p0.2
@@ -10,6 +11,7 @@ startButton				equ		p0.6
 packageDetected			equ		p0.7
 
 ;outputs
+
 startConveyors 			equ 	p1.0
 palletizerChainBack		equ		p1.1
 palletizerChainForw		equ		p1.2

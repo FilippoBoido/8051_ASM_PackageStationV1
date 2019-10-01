@@ -1,5 +1,20 @@
-;inputs
+;----------------------------------------------------------------------------------------
+;DB
 
+;----------------------------------------------------------------------------------------
+
+ORG 1000h
+mes_seg1_1:	DB "Conveyors started\r\n",0
+mes_seg1_2:	DB "Capacity reached\r\n",0
+mes_seg1_3:	DB "Packages in position\r\n",0
+mes_seg1_4:	DB "Pushing packages\r\n",0
+mes_seg1_5:	DB "Clamping packages\r\n",0
+mes_seg1_6:	DB "Unclamping packages\r\n",0
+;mes_seg1_7:	DB "Hello World message 7",0
+;mes_seg1_8:	DB "Hello World message 8",0	
+
+ORG 0h
+;inputs
 safetyOK				equ		p0.0
 palletizerElevMoving	equ		p0.1
 pallElevBackLimit		equ		p0.2
@@ -11,7 +26,6 @@ startButton				equ		p0.6
 packageDetected			equ		p0.7
 
 ;outputs
-
 startConveyors 			equ 	p1.0
 palletizerChainBack		equ		p1.1
 palletizerChainForw		equ		p1.2
@@ -68,14 +82,46 @@ clampPackages			equ		23h.0
 unclampPackages			equ		23h.1
 conveyorsStarted		equ		23h.2
 secondWave				equ		23h.3
+serialBusy				equ		23h.4
+serialSend				equ		23h.5
 ;----------------------------------------------------------------------------------------
-;byte-memory		- Starting from adress 30h to 4Fh
+;byte-memory		- Starting from adress 30h to 3Fh
 ;----------------------------------------------------------------------------------------
 
 packagesDetected		equ		30h
 buffer					equ		31h
 debugBuffer				equ		32h
 timerBuffer				equ		33h
+serialCounter			equ		34h
+
+;----------------------------------------------------------------------------------------
+;Messaging memory 	- Starting form address 40h to 4Fh 
+;----------------------------------------------------------------------------------------
+
+;----------------------------------------------------------------------------------------
+;Interpretation of the messege segment:
+;
+;	Message 1 has been sent -> h01
+;	Message 2 has been sent -> h02
+;	Message 3 has been sent -> h04
+;	Message 4 has been sent -> h08
+;	Message 5 has been sent -> h10
+;	Message 6 has been sent -> h20
+;	Message 7 has been sent -> h40
+;	Message 8 has been sent -> h80
+;
+;----------------------------------------------------------------------------------------
+mesSegment1				equ		40h
+mesSegment2				equ		41h
+mesSegment3				equ		42h
+mesSegment4				equ		43h
+mesSegment5				equ		44h
+mesSegment6				equ		45h
+mesSegment7				equ		46h
+mesSegment8				equ		47h
+mesSegment9				equ		48h
+mesSegment10			equ		49h
+
 
 ;----------------------------------------------------------------------------------------
 ;2/4 bytes timers	- Starting from adress 50h
@@ -145,6 +191,7 @@ rollerConvDesiredLoop	equ		7Dh
 
 cMaxCapacity			equ		3d
 
+	
 
 ;----------------------------------------------------------------------------------------
 ;Init stage
@@ -158,8 +205,12 @@ init:
 	mov		p2, #00h
 	mov		p3, #00h
 	
-	acall	_new_cycle
+	;for serial communication
+	setb 	p3.1
+	setb	p3.0
 	
+	acall	_new_cycle
+	acall	_init_message_segment
 	;setup timers
 	
 	;8s
@@ -232,6 +283,18 @@ init:
 	mov		rollerConvLoopCounter, #0d	
 	mov		rollerConvDesiredLoop, #12d	
 	
+	
+	;8-bit 1Stop REN-enabled
+	mov		scon, #52h
+	orl		pcon, #80h
+	anl		tmod, #0
+	orl		tmod, #1
+	;set mode 2 and auto reload function 
+	orl		tmod, #20h
+	;value for baud rate
+	mov		th1, #245
+	;start timer 1 for serial com
+	setb	tr1
 	;----------------------------------------------------------------------------------------
 	;debug
 	;----------------------------------------------------------------------------------------
@@ -244,8 +307,7 @@ init:
 
 cycle_start:
 
-	anl		tmod, #0
-	orl		tmod, #1
+
 	;Zeit zurücksetzen					
 	clr 	tr0					
 	;1ms cycle					
@@ -261,18 +323,20 @@ cycle_start:
 
 checks:
 	
+	
 	;check if cycle time has been exceeded
 	jb		cycleTimeError, check_cycle	
 	;start machine operation if startButton is set
 	jb		startButton, check_start
 	;else stop machine operation
+		
 	acall	_stop_conveyors
 	acall	_stop_light
 	acall	_stop_elevator
 	
 	clr		homed
 	
-	jmp		wait_end_cycle 
+	jmp		serial_com 
 
 check_cycle:
 	
@@ -284,9 +348,19 @@ check_cycle:
 	
 	end_check_cycle:
 	
-		jmp		wait_end_cycle
+		jmp		serial_com
 	
 check_start:
+	;send serial message:
+	
+	;01h stands for the first string in the segment memory
+	;02h stands for the second string 04h for the third...
+	;mov 	r3, #01h
+	;mov the address of desired segment memory into r0
+	;mov		r0, #mesSegment1
+	;mov the address of desired message into dptr
+
+	;acall	_send_message
 	;home if not homed
 	jnb		homed, check_homing
 	;else start machine operation
@@ -295,7 +369,7 @@ check_start:
 check_homing:	
 
 	acall	_home
-	jmp		wait_end_cycle
+	jmp		serial_com
 	
 	
 ;Execution chain for machine part 1
@@ -312,7 +386,7 @@ op_thread_1:
 	jnb		packagesInPos, packages_in_pos
 	jnb		pushPackages, push_packages
 	jnb		clampPackages, clamp_packages
-	jnb		unclampPackages, unclamp_packages
+	
 	;Execution chain for machine part 2	
 	jmp		op_thread_1_part_2
 	
@@ -323,6 +397,11 @@ start_conveyors:
 	setb	startConveyors
 	setb	conveyorsStarted
 	setb	palletizerConvForw
+	
+	mov		dptr, #mes_seg1_1
+	setb	serialSend
+	acall	_serial_send_string
+	
 	;goto next execution chain	
 	jmp		op_thread_2 
 	
@@ -346,6 +425,10 @@ capacity_reached:
 		
 		setb	capacityReached
 		
+		mov		dptr, #mes_seg1_2
+		setb	serialSend
+		acall	_serial_send_string
+		
 		jmp 	end_capacity_reached
 	
 	end_capacity_reached:
@@ -357,11 +440,19 @@ packages_in_pos:
 	
 	mov		r0, #palletizerDelayCounter3
 	call	_timer_long_delay
-	cjne	r2, #0d, op_thread_2
+	cjne	r2, #0d, end_packages_in_pos
+	
 	setb	packagesInPos
+	
+	mov		dptr, #mes_seg1_3
+	setb	serialSend
+	acall	_serial_send_string
+	
 	clr		startConveyors
 	clr		palletizerConvForw
-	jmp		op_thread_2
+	
+	end_packages_in_pos:
+		jmp		op_thread_2
 
 push_packages:
 
@@ -371,6 +462,11 @@ push_packages:
 	cjne	r2, #0d, op_thread_2
 	clr		palletizerPush
 	setb	pushPackages
+	
+	mov		dptr, #mes_seg1_4
+	setb	serialSend
+	acall	_serial_send_string
+	
 	jmp		op_thread_2
 
 clamp_packages:
@@ -380,7 +476,21 @@ clamp_packages:
 	call	_timer_long_delay
 	cjne	r2, #0d, op_thread_2
 	setb	clampPackages
+	
+	mov		dptr, #mes_seg1_5
+	setb	serialSend
+	acall	_serial_send_string
+	
 	jmp		op_thread_2
+	
+		
+op_thread_1_part_2:
+
+	jnb		unclampPackages, unclamp_packages
+	clr		secondWave
+	jnb		openPalletizerPort, open_palletizer_port
+	jnb		closePalletizerPort, close_palletizer_port
+	jmp 	op_thread_2
 	
 unclamp_packages:
 
@@ -402,16 +512,14 @@ unclamp_packages:
 	
 	end_unclamp_packages:
 		setb	unclampPackages
-		setb	yellowLight
-		jmp		op_thread_2	
 		
-op_thread_1_part_2:
-
-	clr		secondWave
-	jnb		openPalletizerPort, open_palletizer_port
-	jnb		closePalletizerPort, close_palletizer_port
-	jmp 	op_thread_2
-	
+		mov		dptr, #mes_seg1_6
+		setb	serialSend
+		acall	_serial_send_string
+		
+		;setb	yellowLight
+		jmp		op_thread_2		
+		
 open_palletizer_port:
 
 	jnb		handshakeAllowOpen, op_thread_2
@@ -424,7 +532,7 @@ close_palletizer_port:
 	
 	jnb		handshakeAllowClose, op_thread_2
 	clr		palletizerOpen
-	clr		yellowLight
+	;clr		yellowLight
 	clr		palletizerClamp
 	setb	closePalletizerPort
 	jmp		op_thread_2
@@ -448,7 +556,7 @@ op_thread_2:
 pallet_process_start:
 
 	setb	palletProcessStart	
-	jmp		wait_end_cycle
+	jmp		serial_com
 	
 pallet_picked_up:
 
@@ -464,7 +572,7 @@ pallet_picked_up:
 	
 	end_pallet_picked_up:
 	
-		jmp		wait_end_cycle
+		jmp		serial_com
 	
 pallet_in_elevator:
 
@@ -479,7 +587,7 @@ pallet_in_elevator:
 	
 	end_pallet_in_elevator:
 	
-		jmp		wait_end_cycle
+		jmp		serial_com
 	
 pallet_sent:
 
@@ -498,7 +606,7 @@ pallet_sent:
 	
 	end_pallet_sent:
 	
-		jmp		wait_end_cycle
+		jmp		serial_com
 	
 pallet_on_route:
 
@@ -508,19 +616,19 @@ pallet_on_route:
 	clr		elevatorForw
 	mov		r0, #palletizerDelayCounter
 	call	_timer_long_delay
-	cjne	r2, #0d, wait_end_cycle
+	cjne	r2, #0d, serial_com
 	clr 	palletizerChainForw
 	setb	palletOnRoute
 	
 		end_pallet_on_route:
-		jmp		wait_end_cycle
+		jmp		serial_com
 	
 pallet_in_palletizer:
 
 	;setb	palletizerChainBack
 	;clr	palletizerChainBack
 	setb	palletInPalletizer
-	jmp		wait_end_cycle
+	jmp		serial_com
 	
 pallet_in_upper_pos:
 
@@ -528,14 +636,14 @@ pallet_in_upper_pos:
 	setb	palletizerElevMoveLimit
 	mov		r0, #palletizerDelayCounter2
 	call	_timer_long_delay
-	cjne	r2, #0d, wait_end_cycle
+	cjne	r2, #0d, serial_com
 	
 	clr		palletizerElevatorUp
 	clr		palletizerElevMoveLimit
 	setb	palletInUpperPos
 	setb	handshakeAllowOpen
 	
-	jmp		wait_end_cycle
+	jmp		serial_com
 
 op_thread_2_part_2:
 
@@ -545,18 +653,18 @@ op_thread_2_part_2:
 	jnb		palletExited, pallet_exited
 	jnb		palletProcessEnd, pallet_process_end
 	
-	jmp		wait_end_cycle
+	jmp		serial_com
 	
 	
 package_on_pallet:
 
-	jb		handshakeAllowOpen, wait_end_cycle
+	jb		handshakeAllowOpen, serial_com
 	mov		r0, #palletizerDelayCounter5
 	call	_timer_long_delay
-	cjne	r2, #0d, wait_end_cycle
+	cjne	r2, #0d, serial_com
 	setb	packageOnPallet
 	
-	jmp		wait_end_cycle
+	jmp		serial_com
 	
 pallet_in_lower_pos:
 
@@ -565,40 +673,50 @@ pallet_in_lower_pos:
 	
 	mov		r0, #palletizerDelayCounter6
 	call	_timer_long_delay
-	cjne	r2, #0d, wait_end_cycle
+	cjne	r2, #0d, serial_com
 	
 	clr		palletizerElevatorDown
 	clr		palletizerElevMoveLimit
 	setb	handshakeAllowClose
 	setb	palletInLowerPos
 	
-	jmp		wait_end_cycle
+	jmp		serial_com
 	
 pallet_exiting:
 
 	setb	startRollerConveyors
 	setb	palletizerChainForw
-	jb		pallElevFrontLimit, wait_end_cycle
+	jb		pallElevFrontLimit, serial_com
 	setb	palletExiting
-	jmp		wait_end_cycle
+	jmp		serial_com
 	
 pallet_exited:
 	
 	mov		r0, #rollerConvDelayCounter
 	call	_timer_long_delay
-	cjne	r2, #0d, wait_end_cycle
+	cjne	r2, #0d, serial_com
 	setb	palletExited
-	jmp		wait_end_cycle
+	jmp		serial_com
 	
 pallet_process_end:
 
 	acall	_new_cycle
-	jmp		wait_end_cycle
+	jmp		serial_com
 	
 ;----------------------------------------------------------------------------------------
 ;Main application ends here				   	
 ;----------------------------------------------------------------------------------------
-	
+
+;----------------------------------------------------------------------------------------
+;Serial communication
+;----------------------------------------------------------------------------------------
+serial_com:
+
+	jnb		serialBusy, wait_end_cycle
+	acall 	_serial_send_string
+	jmp		wait_end_cycle
+
+
 ;----------------------------------------------------------------------------------------
 ;Wait here for the end of the cycle	
 ;----------------------------------------------------------------------------------------
@@ -662,6 +780,23 @@ ret
 
 ;----------------------------------------------------------------------------------------
 
+_init_message_segment:
+
+	mov		mesSegment1, #0d		
+	mov		mesSegment2, #0d		
+	mov		mesSegment3, #0d		
+	mov		mesSegment4, #0d		
+	mov		mesSegment5, #0d		
+	mov		mesSegment6, #0d		
+	mov		mesSegment7, #0d		
+	mov		mesSegment8, #0d		
+	mov		mesSegment9, #0d		
+	mov		mesSegment10, #0d	
+	
+ret
+
+;----------------------------------------------------------------------------------------
+
 _home:
 	
 	jb		homed, ret_home
@@ -669,7 +804,7 @@ _home:
 	clr		startConveyors
 	clr		greenLight
 	clr		redLight
-	clr		yellowLight
+	;clr		yellowLight
 		
 	jnb		palletSent, sub_home_1
 	;else if a pallet has already been sent run the roller conveyors for x time
@@ -692,7 +827,7 @@ _home:
 	ret_home:
 		
 ret
-
+;----------------------------------------------------------------------------------------
 _new_cycle:
 	
 	;reset bit memory
@@ -770,5 +905,76 @@ _debug_delayer:
 ret
 
 ;----------------------------------------------------------------------------------------
+;SERIAL_SEND_CHAR						   	
+;----------------------------------------------------------------------------------------
+
+_serial_send_char:
+
+	jnb		ti, end_send_char
+		
+	mov		sbuf, A	
+	clr		ti
+	inc		serialCounter
+	end_send_char:
+	
+ret
+
+
+;----------------------------------------------------------------------------------------
+;SERIAL_SEND_STRING						   	
+;----------------------------------------------------------------------------------------
+
+_serial_send_string:
+
+	jnb		serialSend, end_serial_out
+	jb		serialBusy, serial_out
+	clr		A
+	mov		serialCounter, #0d
+	
+	serial_out:
+
+		
+		mov		A, serialCounter
+		movc	A, @A+DPTR
+		
+		clr		serialBusy
+		clr		serialSend
+		
+		jz		end_serial_out
+		
+		setb	serialBusy
+		setb	serialSend
+		
+		call     _serial_send_char
+	
+	end_serial_out:
+
+ret
+
+;----------------------------------------------------------------------------------------
+
+;----------------------------------------------------------------------------------------
+;Send message						   	
+;----------------------------------------------------------------------------------------
+
+_send_message:
+;copy the segment memory bit to check into A
+	mov 	A, r3
+	;check if message has been already sent
+	anl		A, @r0
+	;if A is not zero then the message has been sent
+	jnz		end_send_message
+	;else
+	
+	;set the message as sent
+	mov 	A, r3		
+	orl		A, @r0
+	mov		@r0, A
+	setb	serialSend
+	acall	_serial_send_string
+	
+	end_send_message:
+	;send the message
+ret
 
 END
